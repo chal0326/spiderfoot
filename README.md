@@ -127,6 +127,38 @@ Also take a look at the [template.yaml](/correlations/template.yaml) file for a 
 
 SpiderFoot has over 200 modules, most of which *don't require API keys*, and many of those that do require API keys *have a free tier*.
 
+#### MANAGING API KEYS WITH A .ENV FILE
+
+`sfapikeys.py` inventories the modules backed by a free-but-registration-required
+data source, and loads their keys from a `.env` file so you don't have to paste
+each one into the web UI by hand.
+
+```bash
+# Show every free-tier provider and which keys you already have set.
+./sfapikeys.py list
+
+# Print a signup worklist: signup URL and per-provider instructions
+# for each key you're still missing.
+./sfapikeys.py plan
+
+# Write a starter .env containing every key variable, ready to fill in.
+./sfapikeys.py template --out .env
+
+# Load the keys from the .env into your SpiderFoot configuration.
+./sfapikeys.py apply --env .env
+```
+
+Variables are named `SPIDERFOOT_<PROVIDER>_<OPTION>`, for example
+`SPIDERFOOT_SHODAN_API_KEY` for the `sfp_shodan` module's `api_key` option. The
+shorter `SHODAN_API_KEY` form is accepted too. Keys already present in your
+shell environment are picked up without a `.env` file, which is convenient for
+Docker and CI. `apply` is idempotent, and `--dry-run` shows what would change
+with the key values masked.
+
+Signing up is still something you do yourself — these providers require you to
+accept their terms and confirm your email address. `plan` just gathers the links
+and steps into one list so it's quick.
+
 | Name     | Description | Type   |
 |:---------| :-----------|:-------|
 [AbstractAPI](https://app.abstractapi.com/)|Look up domain, phone and IP address information from AbstractAPI.|Tiered API
