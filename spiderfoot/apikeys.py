@@ -10,6 +10,7 @@
 import ast
 import os
 import re
+import shutil
 
 
 class SpiderFootApiKeys:
@@ -34,6 +35,76 @@ class SpiderFootApiKeys:
 
     # Credential-looking options which are not actually secrets.
     CREDENTIAL_OPT_EXCLUDE = ("api_hostname",)
+
+    # Named groups of event types, so a scan focused on particular kinds of
+    # entity can be narrowed to only the providers which act on them.
+    EVENT_GROUPS = {
+        'ip': (
+            "IP_ADDRESS",
+            "IPV6_ADDRESS",
+            "AFFILIATE_IPADDR",
+            "AFFILIATE_IPV6_ADDRESS",
+            "NETBLOCK_OWNER",
+            "NETBLOCK_MEMBER",
+            "NETBLOCKV6_OWNER",
+            "NETBLOCKV6_MEMBER",
+        ),
+        'email': (
+            "EMAILADDR",
+            "EMAILADDR_GENERIC",
+            "EMAILADDR_COMPROMISED",
+            "EMAILADDR_DELIVERABLE",
+            "EMAILADDR_UNDELIVERABLE",
+            "EMAILADDR_DISPOSABLE",
+            "AFFILIATE_EMAILADDR",
+        ),
+        'domain': (
+            "DOMAIN_NAME",
+            "INTERNET_NAME",
+            "AFFILIATE_INTERNET_NAME",
+            "CO_HOSTED_SITE",
+        ),
+        'phone': (
+            "PHONE_NUMBER",
+        ),
+        'person': (
+            "HUMAN_NAME",
+            "USERNAME",
+            "SOCIAL_MEDIA",
+        ),
+    }
+
+    # Bundled 'Tool - ' modules shell out to a locally installed binary. The
+    # executable is usually named after the module, so only the exceptions are
+    # listed here; candidates are tried in order.
+    TOOL_BINARIES = {
+        'sfp_tool_testsslsh': ("testssl.sh", "testssl"),
+        'sfp_tool_retirejs': ("retire",),
+        'sfp_tool_cmseek': ("cmseek.py", "cmseek"),
+        'sfp_tool_wappalyzer': ("wappalyzer",),
+        'sfp_tool_nuclei': ("nuclei",),
+    }
+
+    # Directories searched in addition to PATH. 'go install', 'pip --user' and
+    # 'npm -g' commonly install to locations a login shell has not picked up.
+    TOOL_EXTRA_DIRS = (
+        "~/go/bin",
+        "~/.local/bin",
+        "/usr/local/go/bin",
+        "/usr/local/bin",
+        "/opt/homebrew/bin",
+        "/snap/bin",
+    )
+
+    # Tool modules which act on IP addresses or hosts, as opposed to web
+    # content, source repositories or domain names.
+    TOOL_IP_FOCUSED = (
+        'sfp_tool_nmap',
+        'sfp_tool_nbtscan',
+        'sfp_tool_onesixtyone',
+        'sfp_tool_nuclei',
+        'sfp_tool_testsslsh',
+    )
 
     @staticmethod
     def modulePath() -> str:
@@ -207,6 +278,61 @@ class SpiderFootApiKeys:
         return (opts, optdescs)
 
     @classmethod
+    def extractEvents(cls, path: str, funcName: str = "watchedEvents") -> list:
+        """Extract the event types a module watches or produces.
+
+        Args:
+            path (str): path to the module source file
+            funcName (str): 'watchedEvents' or 'producedEvents'
+
+        Returns:
+            list: event type names, empty if they could not be determined
+        """
+        try:
+            with open(path, 'r', encoding='utf-8') as f:
+                tree = ast.parse(f.read())
+        except Exception:
+            return list()
+
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.FunctionDef) or node.name != funcName:
+                continue
+            for stmt in ast.walk(node):
+                if not isinstance(stmt, ast.Return):
+                    continue
+                try:
+                    value = ast.literal_eval(stmt.value)
+                except Exception:
+                    return list()
+                if isinstance(value, (list, tuple)):
+                    return [e for e in value if isinstance(e, str)]
+
+        return list()
+
+    @classmethod
+    def expandEvents(cls, names) -> set:
+        """Expand group names and event names into a set of event types.
+
+        Args:
+            names: iterable of group names (e.g. 'ip') or event types
+
+        Returns:
+            set: event type names
+        """
+        events = set()
+
+        for name in names or ():
+            key = name.strip()
+            if not key:
+                continue
+            if key.lower() in cls.EVENT_GROUPS:
+                events.update(cls.EVENT_GROUPS[key.lower()])
+            else:
+                events.add(key.upper())
+
+        return events
+
+    @classmethod
     def credentialOpts(cls, opts: dict) -> list:
         """Return the option names which look like credentials.
 
@@ -236,16 +362,29 @@ class SpiderFootApiKeys:
         return sorted(found)
 
     @classmethod
-    def discover(cls, modulesDir: str = None, freeOnly: bool = True) -> list:
+    def discover(cls, modulesDir: str = None, freeOnly: bool = True,
+                 events=None, modules=None) -> list:
         """Inventory the modules which require API keys.
 
         Args:
             modulesDir (str): path to the modules directory; defaults to bundled
             freeOnly (bool): only report sources which are free but need signup
+            events: optional iterable of event types or group names ('ip',
+                'email', ...); only providers acting on one of them are reported
+            modules: optional iterable of module names to restrict to, with or
+                without the 'sfp_' prefix
 
         Returns:
             list: provider dicts, sorted by module name
         """
+        wanted = cls.expandEvents(events) if events else None
+
+        only = None
+        if modules:
+            only = {
+                m if m.startswith("sfp_") else f"sfp_{m}"
+                for m in (n.strip() for n in modules) if m
+            }
         if modulesDir is None:
             modulesDir = cls.modulePath()
 
@@ -261,6 +400,10 @@ class SpiderFootApiKeys:
                 continue
 
             modName = filename[:-3]
+
+            if only is not None and modName not in only:
+                continue
+
             path = os.path.join(modulesDir, filename)
 
             meta = cls.extractMeta(path)
@@ -279,6 +422,13 @@ class SpiderFootApiKeys:
             if not credOpts:
                 continue
 
+            watched = cls.extractEvents(path, "watchedEvents")
+
+            if wanted is not None:
+                # '*' means the module watches everything, so it always applies.
+                if "*" not in watched and not wanted.intersection(watched):
+                    continue
+
             providers.append({
                 'module': modName,
                 'name': meta.get('name', modName),
@@ -286,6 +436,7 @@ class SpiderFootApiKeys:
                 'website': dataSource.get('website', ""),
                 'instructions': dataSource.get('apiKeyInstructions') or list(),
                 'summary': meta.get('summary', ""),
+                'watched': watched,
                 'options': [
                     {
                         'opt': opt,
@@ -298,6 +449,103 @@ class SpiderFootApiKeys:
             })
 
         return providers
+
+    @classmethod
+    def findBinary(cls, names) -> str:
+        """Locate an executable on PATH or in the common install directories.
+
+        Args:
+            names: iterable of candidate executable names, tried in order
+
+        Returns:
+            str: full path to the executable, or an empty string
+        """
+        extra = list()
+        for directory in cls.TOOL_EXTRA_DIRS:
+            expanded = os.path.expanduser(directory)
+            if os.path.isdir(expanded):
+                extra.append(expanded)
+
+        # GOPATH is only known by asking go, so honour the variable if set.
+        goPath = os.environ.get('GOPATH', "")
+        if goPath:
+            goBin = os.path.join(goPath, "bin")
+            if os.path.isdir(goBin) and goBin not in extra:
+                extra.append(goBin)
+
+        searchPath = os.pathsep.join(
+            [os.environ.get('PATH', "")] + extra
+        )
+
+        for name in names:
+            located = shutil.which(name, path=searchPath)
+            if located:
+                return located
+
+        return ""
+
+    @classmethod
+    def discoverTools(cls, modulesDir: str = None, ipOnly: bool = False) -> list:
+        """Inventory the bundled modules which shell out to a local binary.
+
+        Args:
+            modulesDir (str): path to the modules directory; defaults to bundled
+            ipOnly (bool): only report the tools which act on IPs and hosts
+
+        Returns:
+            list: tool dicts, sorted by module name
+        """
+        if modulesDir is None:
+            modulesDir = cls.modulePath()
+
+        tools = list()
+
+        try:
+            filenames = sorted(os.listdir(modulesDir))
+        except Exception:
+            return tools
+
+        for filename in filenames:
+            if not filename.startswith("sfp_tool_") or not filename.endswith(".py"):
+                continue
+
+            modName = filename[:-3]
+
+            if ipOnly and modName not in cls.TOOL_IP_FOCUSED:
+                continue
+
+            path = os.path.join(modulesDir, filename)
+            opts, _ = cls.extractOpts(path)
+
+            # The binary location is the path option left empty by default;
+            # options like 'pythonpath' ship with a working default.
+            pathOpt = None
+            for opt in opts:
+                if 'path' in opt.lower() and opts[opt] == "":
+                    pathOpt = opt
+                    break
+
+            if not pathOpt:
+                continue
+
+            stem = modName[len("sfp_tool_"):]
+            candidates = cls.TOOL_BINARIES.get(modName, (stem,))
+
+            found = cls.findBinary(candidates)
+
+            meta = cls.extractMeta(path)
+
+            tools.append({
+                'module': modName,
+                'name': meta.get('name', modName),
+                'binaries': list(candidates),
+                'opt': pathOpt,
+                'config_key': f"{modName}:{pathOpt}",
+                'path': found,
+                'installed': bool(found),
+            })
+
+        return tools
 
     @classmethod
     def resolve(cls, providers: list, env: dict) -> tuple:

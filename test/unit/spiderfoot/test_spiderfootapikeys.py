@@ -163,6 +163,95 @@ class TestSpiderFootApiKeys(unittest.TestCase):
         with self.assertRaises(TypeError):
             SpiderFootApiKeys.resolve([], None)
 
+    def test_expand_events_resolves_groups_and_raw_types(self):
+        self.assertIn("IP_ADDRESS", SpiderFootApiKeys.expandEvents(['ip']))
+        self.assertIn("EMAILADDR", SpiderFootApiKeys.expandEvents(['email']))
+
+        # Group names are case-insensitive and raw event types pass through.
+        both = SpiderFootApiKeys.expandEvents(['IP', 'PHONE_NUMBER'])
+        self.assertIn("IP_ADDRESS", both)
+        self.assertIn("PHONE_NUMBER", both)
+
+        self.assertEqual(set(), SpiderFootApiKeys.expandEvents(None))
+        self.assertEqual(set(), SpiderFootApiKeys.expandEvents([' ']))
+
+    def test_extract_events_returns_watched_types(self):
+        path = os.path.join(SpiderFootApiKeys.modulePath(), "sfp_shodan.py")
+
+        watched = SpiderFootApiKeys.extractEvents(path, "watchedEvents")
+        self.assertIn("IP_ADDRESS", watched)
+
+        produced = SpiderFootApiKeys.extractEvents(path, "producedEvents")
+        self.assertIsInstance(produced, list)
+        self.assertTrue(produced)
+
+    def test_extract_events_missing_file_returns_list(self):
+        self.assertEqual(
+            [], SpiderFootApiKeys.extractEvents("/nonexistent/module.py")
+        )
+
+    def test_discover_filters_by_event_group(self):
+        every = SpiderFootApiKeys.discover()
+        ipOnly = SpiderFootApiKeys.discover(events=['ip'])
+
+        self.assertTrue(0 < len(ipOnly) < len(every))
+
+        modules = [p['module'] for p in ipOnly]
+        self.assertIn('sfp_shodan', modules)
+
+        # Every provider returned must actually watch an IP event type.
+        wanted = SpiderFootApiKeys.expandEvents(['ip'])
+        for provider in ipOnly:
+            watched = set(provider['watched'])
+            self.assertTrue(
+                "*" in watched or wanted.intersection(watched),
+                f"{provider['module']} does not watch an IP event"
+            )
+
+    def test_discover_filters_by_module_name(self):
+        picked = SpiderFootApiKeys.discover(modules=['shodan', 'sfp_emailrep'])
+
+        self.assertEqual(
+            ['sfp_emailrep', 'sfp_shodan'],
+            sorted(p['module'] for p in picked)
+        )
+
+        # An unknown module simply yields nothing rather than raising.
+        self.assertEqual([], SpiderFootApiKeys.discover(modules=['nope_xyz']))
+
+    def test_discover_tools_reports_path_option(self):
+        tools = SpiderFootApiKeys.discoverTools()
+
+        self.assertTrue(tools)
+
+        modules = [t['module'] for t in tools]
+        self.assertIn('sfp_tool_nmap', modules)
+
+        for tool in tools:
+            self.assertTrue(tool['config_key'].startswith(f"{tool['module']}:"))
+            self.assertTrue(tool['binaries'])
+            self.assertIsInstance(tool['installed'], bool)
+            # A tool reported as installed must have a real path.
+            if tool['installed']:
+                self.assertTrue(os.path.exists(tool['path']))
+
+    def test_discover_tools_ip_only_is_a_subset(self):
+        every = SpiderFootApiKeys.discoverTools()
+        ipOnly = SpiderFootApiKeys.discoverTools(ipOnly=True)
+
+        self.assertTrue(0 < len(ipOnly) < len(every))
+        for tool in ipOnly:
+            self.assertIn(tool['module'], SpiderFootApiKeys.TOOL_IP_FOCUSED)
+
+    def test_find_binary_locates_known_executable(self):
+        # 'sh' exists on every supported platform.
+        self.assertTrue(SpiderFootApiKeys.findBinary(['sh']).endswith("sh"))
+
+        # Falls through the candidate list to the one that exists.
+        self.assertTrue(SpiderFootApiKeys.findBinary(['nope_xyz_123', 'sh']))
+
+        self.assertEqual("", SpiderFootApiKeys.findBinary(['nope_xyz_123']))
+
     def test_mask_hides_all_but_last_four(self):
         self.assertEqual("********cret", SpiderFootApiKeys.mask("abc123secret"))
         self.assertEqual("***", SpiderFootApiKeys.mask("abc"))

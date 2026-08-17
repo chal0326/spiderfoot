@@ -148,6 +148,39 @@ each one into the web UI by hand.
 ./sfapikeys.py apply --env .env
 ```
 
+Every command takes `--events` and `--modules` to narrow the provider list to
+what a given investigation actually needs, so you only sign up for what you use:
+
+```bash
+# Only providers acting on IP addresses and e-mail addresses.
+./sfapikeys.py plan --events ip,email
+
+# Only a hand-picked set.
+./sfapikeys.py template --modules shodan,alienvault,emailrep --out .env
+```
+
+Groups are `ip`, `email`, `domain`, `phone` and `person`; raw event types such as
+`IP_ADDRESS` work too. The filter reads each module's `watchedEvents()`, so it
+stays correct as modules change.
+
+#### EXTERNAL TOOLS
+
+Thirteen bundled modules shell out to a locally installed binary instead of an
+API. They need no key, only the path to the executable:
+
+```bash
+./sfinstall-tools.sh              # install the IP/host tools, then configure them
+./sfinstall-tools.sh --all        # add the web, domain and repository tools
+./sfinstall-tools.sh --dry-run    # show what would be installed
+
+./sfapikeys.py tools              # report which tools are installed
+./sfapikeys.py tools --apply      # record their paths in the configuration
+```
+
+The installer supports apt, dnf, brew and pacman. Detection also searches
+`~/go/bin`, `~/.local/bin` and the other directories that `go install`,
+`pip --user` and `npm -g` write to but a login shell often misses.
+
 Variables are named `SPIDERFOOT_<PROVIDER>_<OPTION>`, for example
 `SPIDERFOOT_SHODAN_API_KEY` for the `sfp_shodan` module's `api_key` option. The
 shorter `SHODAN_API_KEY` form is accepted too. Keys already present in your

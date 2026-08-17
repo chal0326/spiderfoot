@@ -28,6 +28,34 @@ _spec.loader.exec_module(_apikeys)
 SpiderFootApiKeys = _apikeys.SpiderFootApiKeys
 
 
+def _modules(args):
+    """Parse the --modules option into a list.
+
+    Args:
+        args (argparse.Namespace): parsed arguments
+
+    Returns:
+        list: module names, or None if unset
+    """
+    if not getattr(args, 'modules', None):
+        return None
+    return [m for m in args.modules.split(',') if m.strip()]
+
+
+def _events(args):
+    """Parse the --events option into a list.
+
+    Args:
+        args (argparse.Namespace): parsed arguments
+
+    Returns:
+        list: event types or group names, or None if unset
+    """
+    if not getattr(args, 'events', None):
+        return None
+    return [e for e in args.events.split(',') if e.strip()]
+
+
 def cmdList(args) -> int:
     """Print the providers which require API keys.
 
@@ -37,7 +65,7 @@ def cmdList(args) -> int:
     Returns:
         int: exit code
     """
-    providers = SpiderFootApiKeys.discover(freeOnly=not args.all)
+    providers = SpiderFootApiKeys.discover(freeOnly=not args.all, events=_events(args), modules=_modules(args))
 
     if not providers:
         print("No providers found.")
@@ -77,7 +105,7 @@ def cmdPlan(args) -> int:
     Returns:
         int: exit code
     """
-    providers = SpiderFootApiKeys.discover(freeOnly=not args.all)
+    providers = SpiderFootApiKeys.discover(freeOnly=not args.all, events=_events(args), modules=_modules(args))
 
     env = dict(os.environ)
     if args.env:
@@ -121,7 +149,7 @@ def cmdTemplate(args) -> int:
     Returns:
         int: exit code
     """
-    providers = SpiderFootApiKeys.discover(freeOnly=not args.all)
+    providers = SpiderFootApiKeys.discover(freeOnly=not args.all, events=_events(args), modules=_modules(args))
 
     lines = [
         "# SpiderFoot API keys",
@@ -158,6 +186,62 @@ def cmdTemplate(args) -> int:
     return 0
 
 
+def cmdTools(args) -> int:
+    """Report bundled tool modules and optionally configure their paths.
+
+    Args:
+        args (argparse.Namespace): parsed arguments
+
+    Returns:
+        int: exit code
+    """
+    tools = SpiderFootApiKeys.discoverTools(ipOnly=args.ip_only)
+
+    optMap = dict()
+
+    for tool in tools:
+        if tool['installed']:
+            print(f"[ FOUND ] {tool['name']}")
+            print(f"          {tool['path']}")
+            optMap[tool['config_key']] = tool['path']
+        else:
+            print(f"[MISSING] {tool['name']}")
+            print(f"          looked for: {', '.join(tool['binaries'])}")
+
+    found = len(optMap)
+    print(f"\n{found}/{len(tools)} tool(s) installed.")
+
+    if not args.apply:
+        if found:
+            print("Re-run with --apply to write these paths into the configuration.")
+        return 0
+
+    if not optMap:
+        print("Nothing to configure.")
+        return 1
+
+    try:
+        from spiderfoot import SpiderFootDb
+        from spiderfoot import SpiderFootHelpers
+    except ImportError as e:
+        print(f"Configuring tools requires SpiderFoot's dependencies: {e}")
+        print("Install them with: pip install -r requirements.txt")
+        return 1
+
+    dbPath = args.database or f"{SpiderFootHelpers.dataPath()}/spiderfoot.db"
+
+    try:
+        dbh = SpiderFootDb({'__database': dbPath}, init=True)
+        dbh.configSet(optMap)
+    except Exception as e:
+        print(f"Failed to write configuration: {e}")
+        return 1
+
+    print(f"Applied {found} tool path(s) to {dbPath}.")
+
+    return 0
+
+
 def cmdApply(args) -> int:
     """Load keys from the environment into the SpiderFoot configuration.
 
@@ -167,7 +251,7 @@ def cmdApply(args) -> int:
     Returns:
         int: exit code
     """
-    providers = SpiderFootApiKeys.discover(freeOnly=not args.all)
+    providers = SpiderFootApiKeys.discover(freeOnly=not args.all, events=_events(args), modules=_modules(args))
 
     env = dict(os.environ)
     if args.env:
@@ -229,6 +313,14 @@ def main() -> int:
     common.add_argument('-e', '--env', help="path to a .env file")
     common.add_argument('-a', '--all', action='store_true',
                         help="include commercial sources, not just free ones")
+    common.add_argument('-m', '--modules',
+                        help="only these modules; comma-separated, with or "
+                             "without the 'sfp_' prefix (e.g. 'shodan,emailrep')")
+    common.add_argument('-E', '--events',
+                        help="only providers acting on these entity types; "
+                             "comma-separated group names (ip, email, domain, "
+                             "phone, person) or raw event types "
+                             "(e.g. 'ip,email')")
 
     p = subparsers.add_parser('list', parents=[common],
                               help="list providers and which keys are set")
@@ -244,6 +336,15 @@ def main() -> int:
     p.add_argument('-f', '--force', action='store_true',
                    help="overwrite an existing file")
     p.set_defaults(func=cmdTemplate)
+
+    p = subparsers.add_parser('tools', parents=[common],
+                              help="find installed tool binaries and configure them")
+    p.add_argument('-i', '--ip-only', action='store_true',
+                   help="only the tools which act on IPs and hosts")
+    p.add_argument('--apply', action='store_true',
+                   help="write discovered paths into the configuration")
+    p.add_argument('-d', '--database', help="path to the SpiderFoot database")
+    p.set_defaults(func=cmdTools)
 
     p = subparsers.add_parser('apply', parents=[common],
                               help="write keys from the environment into the config")
