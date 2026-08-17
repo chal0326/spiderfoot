@@ -127,6 +127,71 @@ Also take a look at the [template.yaml](/correlations/template.yaml) file for a 
 
 SpiderFoot has over 200 modules, most of which *don't require API keys*, and many of those that do require API keys *have a free tier*.
 
+#### MANAGING API KEYS WITH A .ENV FILE
+
+`sfapikeys.py` inventories the modules backed by a free-but-registration-required
+data source, and loads their keys from a `.env` file so you don't have to paste
+each one into the web UI by hand.
+
+```bash
+# Show every free-tier provider and which keys you already have set.
+./sfapikeys.py list
+
+# Print a signup worklist: signup URL and per-provider instructions
+# for each key you're still missing.
+./sfapikeys.py plan
+
+# Write a starter .env containing every key variable, ready to fill in.
+./sfapikeys.py template --out .env
+
+# Load the keys from the .env into your SpiderFoot configuration.
+./sfapikeys.py apply --env .env
+```
+
+Every command takes `--events` and `--modules` to narrow the provider list to
+what a given investigation actually needs, so you only sign up for what you use:
+
+```bash
+# Only providers acting on IP addresses and e-mail addresses.
+./sfapikeys.py plan --events ip,email
+
+# Only a hand-picked set.
+./sfapikeys.py template --modules shodan,alienvault,emailrep --out .env
+```
+
+Groups are `ip`, `email`, `domain`, `phone` and `person`; raw event types such as
+`IP_ADDRESS` work too. The filter reads each module's `watchedEvents()`, so it
+stays correct as modules change.
+
+#### EXTERNAL TOOLS
+
+Thirteen bundled modules shell out to a locally installed binary instead of an
+API. They need no key, only the path to the executable:
+
+```bash
+./sfinstall-tools.sh              # install the IP/host tools, then configure them
+./sfinstall-tools.sh --all        # add the web, domain and repository tools
+./sfinstall-tools.sh --dry-run    # show what would be installed
+
+./sfapikeys.py tools              # report which tools are installed
+./sfapikeys.py tools --apply      # record their paths in the configuration
+```
+
+The installer supports apt, dnf, brew and pacman. Detection also searches
+`~/go/bin`, `~/.local/bin` and the other directories that `go install`,
+`pip --user` and `npm -g` write to but a login shell often misses.
+
+Variables are named `SPIDERFOOT_<PROVIDER>_<OPTION>`, for example
+`SPIDERFOOT_SHODAN_API_KEY` for the `sfp_shodan` module's `api_key` option. The
+shorter `SHODAN_API_KEY` form is accepted too. Keys already present in your
+shell environment are picked up without a `.env` file, which is convenient for
+Docker and CI. `apply` is idempotent, and `--dry-run` shows what would change
+with the key values masked.
+
+Signing up is still something you do yourself — these providers require you to
+accept their terms and confirm your email address. `plan` just gathers the links
+and steps into one list so it's quick.
+
 | Name     | Description | Type   |
 |:---------| :-----------|:-------|
 [AbstractAPI](https://app.abstractapi.com/)|Look up domain, phone and IP address information from AbstractAPI.|Tiered API

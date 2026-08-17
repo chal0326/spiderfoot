@@ -1,0 +1,366 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+# -------------------------------------------------------------------------------
+# Name:        sfapikeys
+# Purpose:     Inventory the modules which require API keys, generate a signup
+#              worklist, and load keys from a .env file into the configuration.
+#
+# Licence:     MIT
+# -------------------------------------------------------------------------------
+
+import argparse
+import os
+import sys
+
+import importlib.util
+
+# spiderfoot/__init__.py eagerly imports every submodule, which pulls in the
+# third-party dependencies. apikeys.py only uses the standard library, so it is
+# loaded directly by path to keep the read-only commands usable on a fresh clone
+# before 'pip install -r requirements.txt' has been run. SpiderFootDb and
+# SpiderFootHelpers are imported inside cmdApply(), which does need them.
+_spec = importlib.util.spec_from_file_location(
+    "spiderfoot_apikeys",
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "spiderfoot", "apikeys.py")
+)
+_apikeys = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(_apikeys)
+SpiderFootApiKeys = _apikeys.SpiderFootApiKeys
+
+
+def _modules(args):
+    """Parse the --modules option into a list.
+
+    Args:
+        args (argparse.Namespace): parsed arguments
+
+    Returns:
+        list: module names, or None if unset
+    """
+    if not getattr(args, 'modules', None):
+        return None
+    return [m for m in args.modules.split(',') if m.strip()]
+
+
+def _events(args):
+    """Parse the --events option into a list.
+
+    Args:
+        args (argparse.Namespace): parsed arguments
+
+    Returns:
+        list: event types or group names, or None if unset
+    """
+    if not getattr(args, 'events', None):
+        return None
+    return [e for e in args.events.split(',') if e.strip()]
+
+
+def cmdList(args) -> int:
+    """Print the providers which require API keys.
+
+    Args:
+        args (argparse.Namespace): parsed arguments
+
+    Returns:
+        int: exit code
+    """
+    providers = SpiderFootApiKeys.discover(freeOnly=not args.all, events=_events(args), modules=_modules(args))
+
+    if not providers:
+        print("No providers found.")
+        return 1
+
+    env = dict(os.environ)
+    if args.env:
+        env.update(SpiderFootApiKeys.parseEnvFile(args.env))
+
+    optMap, _ = SpiderFootApiKeys.resolve(providers, env)
+
+    for provider in providers:
+        have = [o for o in provider['options'] if o['config_key'] in optMap]
+        status = "SET" if len(have) == len(provider['options']) else (
+            "PARTIAL" if have else "-"
+        )
+        print(f"[{status:^7}] {provider['name']} ({provider['module']})")
+        print(f"          {provider['model']}  {provider['website']}")
+        for option in provider['options']:
+            print(f"          env: {option['env_var']}")
+        print()
+
+    total = len(providers)
+    done = len({p['module'] for p in providers
+                if all(o['config_key'] in optMap for o in p['options'])})
+    print(f"{done}/{total} providers have every key set.")
+
+    return 0
+
+
+def cmdPlan(args) -> int:
+    """Print a signup worklist for providers with keys still missing.
+
+    Args:
+        args (argparse.Namespace): parsed arguments
+
+    Returns:
+        int: exit code
+    """
+    providers = SpiderFootApiKeys.discover(freeOnly=not args.all, events=_events(args), modules=_modules(args))
+
+    env = dict(os.environ)
+    if args.env:
+        env.update(SpiderFootApiKeys.parseEnvFile(args.env))
+
+    _, missing = SpiderFootApiKeys.resolve(providers, env)
+
+    if not missing:
+        print("Every provider already has its keys set. Nothing to sign up for.")
+        return 0
+
+    byModule = dict()
+    for item in missing:
+        byModule.setdefault(item['module'], item)
+
+    print(f"# API key signup worklist ({len(byModule)} providers)\n")
+    print("Each of these is free to use but requires registration. Sign up,")
+    print("then put the key in your .env file under the listed variable name")
+    print("and run: sfapikeys.py apply --env <file>\n")
+
+    for i, (modName, item) in enumerate(sorted(byModule.items()), start=1):
+        print(f"## {i}. {item['name']}  [{modName}]")
+        if item['website']:
+            print(f"Signup: {item['website']}")
+        for step in item['instructions']:
+            print(f"  - {step}")
+        envVars = sorted({m['env_var'] for m in missing if m['module'] == modName})
+        for envVar in envVars:
+            print(f"{envVar}=")
+        print()
+
+    return 0
+
+
+def cmdTemplate(args) -> int:
+    """Write a .env template containing every credential variable.
+
+    Args:
+        args (argparse.Namespace): parsed arguments
+
+    Returns:
+        int: exit code
+    """
+    providers = SpiderFootApiKeys.discover(freeOnly=not args.all, events=_events(args), modules=_modules(args))
+
+    lines = [
+        "# SpiderFoot API keys",
+        "# Generated by sfapikeys.py template",
+        "#",
+        "# Fill in the keys you have and run:",
+        "#   ./sfapikeys.py apply --env <this file>",
+        "#",
+        "# Keep this file out of version control.",
+        "",
+    ]
+
+    for provider in providers:
+        lines.append(f"# {provider['name']} - {provider['website']}")
+        for option in provider['options']:
+            if option['desc']:
+                lines.append(f"# {option['desc']}")
+            lines.append(f"{option['env_var']}=")
+        lines.append("")
+
+    content = "\n".join(lines)
+
+    if args.out:
+        if os.path.exists(args.out) and not args.force:
+            print(f"Refusing to overwrite existing file: {args.out} (use --force)")
+            return 1
+        with open(args.out, 'w', encoding='utf-8') as f:
+            f.write(content)
+        os.chmod(args.out, 0o600)
+        print(f"Wrote template for {len(providers)} providers to {args.out}")
+    else:
+        print(content)
+
+    return 0
+
+
+def cmdTools(args) -> int:
+    """Report bundled tool modules and optionally configure their paths.
+
+    Args:
+        args (argparse.Namespace): parsed arguments
+
+    Returns:
+        int: exit code
+    """
+    tools = SpiderFootApiKeys.discoverTools(ipOnly=args.ip_only)
+
+    optMap = dict()
+
+    for tool in tools:
+        if tool['installed']:
+            print(f"[ FOUND ] {tool['name']}")
+            print(f"          {tool['path']}")
+            optMap[tool['config_key']] = tool['path']
+        else:
+            print(f"[MISSING] {tool['name']}")
+            print(f"          looked for: {', '.join(tool['binaries'])}")
+
+    found = len(optMap)
+    print(f"\n{found}/{len(tools)} tool(s) installed.")
+
+    if not args.apply:
+        if found:
+            print("Re-run with --apply to write these paths into the configuration.")
+        return 0
+
+    if not optMap:
+        print("Nothing to configure.")
+        return 1
+
+    try:
+        from spiderfoot import SpiderFootDb
+        from spiderfoot import SpiderFootHelpers
+    except ImportError as e:
+        print(f"Configuring tools requires SpiderFoot's dependencies: {e}")
+        print("Install them with: pip install -r requirements.txt")
+        return 1
+
+    dbPath = args.database or f"{SpiderFootHelpers.dataPath()}/spiderfoot.db"
+
+    try:
+        dbh = SpiderFootDb({'__database': dbPath}, init=True)
+        dbh.configSet(optMap)
+    except Exception as e:
+        print(f"Failed to write configuration: {e}")
+        return 1
+
+    print(f"Applied {found} tool path(s) to {dbPath}.")
+
+    return 0
+
+
+def cmdApply(args) -> int:
+    """Load keys from the environment into the SpiderFoot configuration.
+
+    Args:
+        args (argparse.Namespace): parsed arguments
+
+    Returns:
+        int: exit code
+    """
+    providers = SpiderFootApiKeys.discover(freeOnly=not args.all, events=_events(args), modules=_modules(args))
+
+    env = dict(os.environ)
+    if args.env:
+        if not os.path.exists(args.env):
+            print(f"Env file not found: {args.env}")
+            return 1
+        env.update(SpiderFootApiKeys.parseEnvFile(args.env))
+
+    optMap, missing = SpiderFootApiKeys.resolve(providers, env)
+
+    if not optMap:
+        print("No API keys found in the environment. Nothing to apply.")
+        print("Run 'sfapikeys.py template' to generate a starter .env file.")
+        return 1
+
+    for configKey in sorted(optMap):
+        print(f"  {configKey} = {SpiderFootApiKeys.mask(optMap[configKey])}")
+
+    if args.dry_run:
+        print(f"\nDry run: {len(optMap)} option(s) would be set. "
+              f"{len(missing)} option(s) still missing.")
+        return 0
+
+    try:
+        from spiderfoot import SpiderFootDb
+        from spiderfoot import SpiderFootHelpers
+    except ImportError as e:
+        print(f"Applying keys requires SpiderFoot's dependencies: {e}")
+        print("Install them with: pip install -r requirements.txt")
+        return 1
+
+    dbPath = args.database or f"{SpiderFootHelpers.dataPath()}/spiderfoot.db"
+
+    try:
+        dbh = SpiderFootDb({'__database': dbPath}, init=True)
+        dbh.configSet(optMap)
+    except Exception as e:
+        print(f"Failed to write configuration: {e}")
+        return 1
+
+    print(f"\nApplied {len(optMap)} option(s) to {dbPath}. "
+          f"{len(missing)} option(s) still missing.")
+
+    return 0
+
+
+def main() -> int:
+    """Entry point.
+
+    Returns:
+        int: exit code
+    """
+    parser = argparse.ArgumentParser(
+        description="Manage SpiderFoot module API keys from a .env file."
+    )
+    subparsers = parser.add_subparsers(dest='command')
+
+    common = argparse.ArgumentParser(add_help=False)
+    common.add_argument('-e', '--env', help="path to a .env file")
+    common.add_argument('-a', '--all', action='store_true',
+                        help="include commercial sources, not just free ones")
+    common.add_argument('-m', '--modules',
+                        help="only these modules; comma-separated, with or "
+                             "without the 'sfp_' prefix (e.g. 'shodan,emailrep')")
+    common.add_argument('-E', '--events',
+                        help="only providers acting on these entity types; "
+                             "comma-separated group names (ip, email, domain, "
+                             "phone, person) or raw event types "
+                             "(e.g. 'ip,email')")
+
+    p = subparsers.add_parser('list', parents=[common],
+                              help="list providers and which keys are set")
+    p.set_defaults(func=cmdList)
+
+    p = subparsers.add_parser('plan', parents=[common],
+                              help="print a signup worklist for missing keys")
+    p.set_defaults(func=cmdPlan)
+
+    p = subparsers.add_parser('template', parents=[common],
+                              help="write a .env template of every key variable")
+    p.add_argument('-o', '--out', help="file to write (default: stdout)")
+    p.add_argument('-f', '--force', action='store_true',
+                   help="overwrite an existing file")
+    p.set_defaults(func=cmdTemplate)
+
+    p = subparsers.add_parser('tools', parents=[common],
+                              help="find installed tool binaries and configure them")
+    p.add_argument('-i', '--ip-only', action='store_true',
+                   help="only the tools which act on IPs and hosts")
+    p.add_argument('--apply', action='store_true',
+                   help="write discovered paths into the configuration")
+    p.add_argument('-d', '--database', help="path to the SpiderFoot database")
+    p.set_defaults(func=cmdTools)
+
+    p = subparsers.add_parser('apply', parents=[common],
+                              help="write keys from the environment into the config")
+    p.add_argument('-d', '--database', help="path to the SpiderFoot database")
+    p.add_argument('-n', '--dry-run', action='store_true',
+                   help="show what would be set without writing")
+    p.set_defaults(func=cmdApply)
+
+    args = parser.parse_args()
+
+    if not args.command:
+        parser.print_help()
+        return 1
+
+    return args.func(args)
+
+
+if __name__ == '__main__':
+    sys.exit(main())

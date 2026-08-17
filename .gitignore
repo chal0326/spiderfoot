@@ -173,3 +173,8 @@ cover/
 # Documentation #
 #################
 docs/_build/
+
+# API key files #
+#################
+.env
+*.env
